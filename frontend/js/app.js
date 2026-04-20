@@ -1,4 +1,4 @@
-// ==================== KONFIGURASI ====================
+
 const API_BASE = window.location.origin;
 let currentDepositId = null;
 let autoCheckInterval = null;
