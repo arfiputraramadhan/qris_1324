@@ -40,7 +40,7 @@ function escapeHtml(text) {
 
 // ==================== NAVIGATION ====================
 function showSection(sectionName) {
-    const sections = ['homeSection', 'paymentSection', 'statusSection', 'listSection'];
+    const sections = ['homeSection', 'paymentSection', 'statusSection'];
     sections.forEach(section => {
         const el = document.getElementById(section);
         if (el) el.style.display = 'none';
@@ -60,9 +60,6 @@ function showSection(sectionName) {
     if (sectionName === 'status') {
         const inputEl = document.getElementById('checkDepositId');
         if (inputEl) inputEl.focus();
-    }
-    if (sectionName === 'list') {
-        loadDepositList();
     }
 }
 
@@ -98,49 +95,6 @@ async function loadProfile() {
     }
 }
 
-// ==================== DEPOSIT LIST ====================
-async function loadDepositList() {
-    const container = document.getElementById('depositListContainer');
-    if (!container) return;
-    
-    container.innerHTML = '<div style="text-align:center; padding: 2rem;"><div class="loading"></div><p>Memuat daftar deposit...</p></div>';
-    
-    try {
-        const response = await fetch(`${API_BASE}/api/deposits/active`);
-        const result = await response.json();
-        
-        if (result.success && result.data && result.data.length > 0) {
-            container.innerHTML = '';
-            for (const deposit of result.data) {
-                const timeLeft = Math.max(0, Math.floor((deposit.expiredAt - Date.now()) / 1000));
-                const minutes = Math.floor(timeLeft / 60);
-                const seconds = timeLeft % 60;
-                
-                const depositDiv = document.createElement('div');
-                depositDiv.className = 'deposit-item';
-                depositDiv.innerHTML = `
-                    <div class="deposit-info">
-                        <strong>${escapeHtml(deposit.id)}</strong><br>
-                        <small>${formatRupiah(deposit.nominal)} | ${escapeHtml(deposit.userName || 'Customer')}</small><br>
-                        <small>⏰ Expired: ${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}</small>
-                    </div>
-                    <div class="deposit-actions">
-                        <button class="btn-secondary" onclick="checkStatus('${deposit.id}')"><i class="fas fa-search"></i></button>
-                        <button class="btn-warning" onclick="quickInstantCheck('${deposit.id}')"><i class="fas fa-bolt"></i></button>
-                        <button class="btn-danger" onclick="quickCancelDeposit('${deposit.id}')"><i class="fas fa-times"></i></button>
-                    </div>
-                `;
-                container.appendChild(depositDiv);
-            }
-        } else {
-            container.innerHTML = '<p style="text-align: center; padding: 2rem;">📭 Tidak ada deposit aktif</p>';
-        }
-    } catch (error) {
-        console.error('Load deposit list error:', error);
-        container.innerHTML = '<p style="text-align: center; padding: 2rem; color: #ef4444;">❌ Gagal memuat daftar deposit</p>';
-    }
-}
-
 // ==================== AUTO CHECK SYSTEM ====================
 function stopAutoCheck() {
     if (autoCheckInterval) {
@@ -165,24 +119,23 @@ function startAutoCheck(depositId) {
                 const status = result.data.status.toLowerCase();
                 updateStatusUI(status);
                 
-                if (status.includes('success') || status.includes('paid') || status.includes('complete')) {
+                // status 'success' atau 'proses' (yang sudah dinormalisasi jadi success)
+                if (status === 'success') {
                     showToast('✅ Pembayaran berhasil! Terima kasih.', 'success');
                     stopAutoCheck();
                     setTimeout(() => {
                         const qrCard = document.getElementById('qrcodeCard');
                         if (qrCard) qrCard.style.display = 'none';
                         currentDepositId = null;
-                        loadDepositList();
                         loadProfile();
                     }, 2000);
-                } else if (status.includes('failed') || status.includes('expired') || status.includes('cancelled')) {
+                } else if (status === 'failed' || status === 'expired' || status === 'cancelled') {
                     showToast(`❌ Pembayaran ${status}`, 'error');
                     stopAutoCheck();
                     setTimeout(() => {
                         const qrCard = document.getElementById('qrcodeCard');
                         if (qrCard) qrCard.style.display = 'none';
                         currentDepositId = null;
-                        loadDepositList();
                     }, 2000);
                 }
             }
@@ -223,7 +176,6 @@ function startCountdown(expiredAt) {
             const qrCard = document.getElementById('qrcodeCard');
             if (qrCard) qrCard.style.display = 'none';
             currentDepositId = null;
-            loadDepositList();
         }
     }, 1000);
 }
@@ -234,16 +186,16 @@ function updateStatusUI(status) {
     
     const statusLower = status.toLowerCase();
     
-    if (statusLower.includes('success') || statusLower.includes('paid') || statusLower.includes('complete')) {
+    if (statusLower === 'success') {
         statusSpan.textContent = 'SUCCESS ✅';
         statusSpan.className = 'status-badge success';
-    } else if (statusLower.includes('pending') || statusLower.includes('waiting')) {
+    } else if (statusLower === 'pending') {
         statusSpan.textContent = 'MENUNGGU ⏳';
         statusSpan.className = 'status-badge pending';
-    } else if (statusLower.includes('expired')) {
+    } else if (statusLower === 'expired') {
         statusSpan.textContent = 'EXPIRED ❌';
         statusSpan.className = 'status-badge expired';
-    } else if (statusLower.includes('cancelled')) {
+    } else if (statusLower === 'cancelled') {
         statusSpan.textContent = 'DIBATALKAN ❌';
         statusSpan.className = 'status-badge cancelled';
     } else {
@@ -307,7 +259,6 @@ async function createDeposit() {
             
             showToast('✅ Deposit berhasil dibuat! Scan QR Code untuk membayar.', 'success');
             if (qrCard) qrCard.scrollIntoView({ behavior: 'smooth' });
-            loadDepositList();
         } else {
             showToast(result.message || 'Gagal membuat deposit', 'error');
         }
@@ -344,7 +295,7 @@ async function checkStatus(depositId) {
         if (resultDiv) {
             if (result.success && result.data) {
                 const data = result.data;
-                const statusClass = data.status.toLowerCase();
+                const statusClass = data.status;
                 resultDiv.innerHTML = `
                     <div class="info-row"><span>ID Transaksi:</span><strong>${escapeHtml(data.id)}</strong></div>
                     <div class="info-row"><span>Nominal:</span><strong>${formatRupiah(data.nominal)}</strong></div>
@@ -352,6 +303,19 @@ async function checkStatus(depositId) {
                     <div class="info-row"><span>Update:</span><span>${new Date().toLocaleString('id-ID')}</span></div>
                 `;
                 if (currentDepositId === depositId) updateStatusUI(data.status);
+                
+                if (data.status === 'success') {
+                    showToast('✅ Pembayaran berhasil!', 'success');
+                    if (currentDepositId === depositId) {
+                        stopAutoCheck();
+                        setTimeout(() => {
+                            const qrCard = document.getElementById('qrcodeCard');
+                            if (qrCard) qrCard.style.display = 'none';
+                            currentDepositId = null;
+                            loadProfile();
+                        }, 2000);
+                    }
+                }
             } else {
                 resultDiv.innerHTML = `<div class="info-row"><span>❌ ${escapeHtml(result.message || 'Deposit tidak ditemukan')}</span></div>`;
             }
@@ -362,83 +326,6 @@ async function checkStatus(depositId) {
             resultDiv.innerHTML = `<div class="info-row"><span>❌ Gagal mengecek status. Periksa koneksi internet.</span></div>`;
         }
         showToast('Gagal mengecek status', 'error');
-    }
-}
-
-// ==================== INSTANT CHECK ====================
-async function instantCheck() {
-    if (!currentDepositId) {
-        showToast('Tidak ada deposit aktif', 'error');
-        return;
-    }
-    
-    const btn = document.getElementById('instantCheckBtn');
-    const originalText = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = '<div class="loading"></div>';
-    
-    try {
-        const response = await fetch(`${API_BASE}/api/deposit/instant`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: currentDepositId })
-        });
-        
-        const result = await response.json();
-        
-        if (result.success && result.data) {
-            const status = result.data.status;
-            updateStatusUI(status);
-            showToast(`⚡ Status: ${status.toUpperCase()}`, status.toLowerCase().includes('success') ? 'success' : 'info');
-            
-            if (status.toLowerCase().includes('success')) {
-                showToast('✅ Pembayaran berhasil!', 'success');
-                stopAutoCheck();
-                setTimeout(() => {
-                    const qrCard = document.getElementById('qrcodeCard');
-                    if (qrCard) qrCard.style.display = 'none';
-                    currentDepositId = null;
-                    loadDepositList();
-                    loadProfile();
-                }, 2000);
-            }
-        } else {
-            showToast(result.message || 'Instant check gagal', 'error');
-        }
-    } catch (error) {
-        console.error('Instant check error:', error);
-        showToast('Gagal melakukan instant check', 'error');
-    } finally {
-        btn.disabled = false;
-        btn.innerHTML = originalText;
-    }
-}
-
-async function quickInstantCheck(depositId) {
-    showToast(`⚡ Instant checking ${depositId}...`, 'info');
-    
-    try {
-        const response = await fetch(`${API_BASE}/api/deposit/instant`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: depositId })
-        });
-        
-        const result = await response.json();
-        
-        if (result.success && result.data) {
-            const status = result.data.status;
-            showToast(`⚡ Deposit ${depositId}: ${status.toUpperCase()}`, status.toLowerCase().includes('success') ? 'success' : 'info');
-            if (status.toLowerCase().includes('success')) {
-                loadDepositList();
-                loadProfile();
-            }
-        } else {
-            showToast(result.message || 'Instant check gagal', 'error');
-        }
-    } catch (error) {
-        console.error('Quick instant check error:', error);
-        showToast('Gagal instant check', 'error');
     }
 }
 
@@ -471,7 +358,6 @@ async function cancelDeposit() {
             const qrCard = document.getElementById('qrcodeCard');
             if (qrCard) qrCard.style.display = 'none';
             currentDepositId = null;
-            loadDepositList();
         } else {
             showToast(result.message || 'Gagal membatalkan', 'error');
         }
@@ -484,41 +370,12 @@ async function cancelDeposit() {
     }
 }
 
-async function quickCancelDeposit(depositId) {
-    if (!confirm(`Batalkan deposit ${depositId}?`)) return;
-    
-    try {
-        const response = await fetch(`${API_BASE}/api/deposit/cancel`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: depositId })
-        });
-        
-        const result = await response.json();
-        
-        if (result.success) {
-            showToast('✅ Deposit berhasil dibatalkan', 'success');
-            if (currentDepositId === depositId) {
-                stopAutoCheck();
-                const qrCard = document.getElementById('qrcodeCard');
-                if (qrCard) qrCard.style.display = 'none';
-                currentDepositId = null;
-            }
-            loadDepositList();
-        } else {
-            showToast(result.message || 'Gagal membatalkan', 'error');
-        }
-    } catch (error) {
-        console.error('Quick cancel error:', error);
-        showToast('Gagal membatalkan deposit', 'error');
-    }
-}
-
 // ==================== EVENT LISTENERS ====================
 document.addEventListener('DOMContentLoaded', () => {
-    console.log('🚀 Atlantic QRIS Web v2.0 Loaded');
-    console.log('⚡ Instant Check Mode: ACTIVE');
+    console.log('🚀 Atlantic QRIS Web v3.0 Loaded');
+    console.log('⚡ Mode: Normal Check (tanpa Instant Check)');
     console.log('⏰ QRIS Expired: 59 menit 28 detik');
+    console.log('📌 Status "PROSES" akan dianggap SUCCESS');
     
     loadProfile();
     setInterval(loadProfile, 60000);
@@ -542,9 +399,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const checkStatusBtn = document.getElementById('checkStatusBtn');
     if (checkStatusBtn) checkStatusBtn.addEventListener('click', () => checkStatus(currentDepositId));
     
-    const instantCheckBtn = document.getElementById('instantCheckBtn');
-    if (instantCheckBtn) instantCheckBtn.addEventListener('click', instantCheck);
-    
     const cancelDepositBtn = document.getElementById('cancelDepositBtn');
     if (cancelDepositBtn) cancelDepositBtn.addEventListener('click', cancelDeposit);
     
@@ -555,9 +409,6 @@ document.addEventListener('DOMContentLoaded', () => {
             if (inputId) checkStatus(inputId.value);
         });
     }
-    
-    const refreshListBtn = document.getElementById('refreshListBtn');
-    if (refreshListBtn) refreshListBtn.addEventListener('click', loadDepositList);
     
     const checkDepositIdInput = document.getElementById('checkDepositId');
     if (checkDepositIdInput) {
@@ -580,9 +431,5 @@ window.showSection = showSection;
 window.scrollToPayment = scrollToPayment;
 window.loadProfile = loadProfile;
 window.checkStatus = checkStatus;
-window.instantCheck = instantCheck;
 window.cancelDeposit = cancelDeposit;
 window.createDeposit = createDeposit;
-window.loadDepositList = loadDepositList;
-window.quickInstantCheck = quickInstantCheck;
-window.quickCancelDeposit = quickCancelDeposit;
