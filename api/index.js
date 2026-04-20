@@ -1,4 +1,3 @@
-// api/index.js
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -77,7 +76,7 @@ function normalizeStatus(apiStatus) {
     
     const statusLower = apiStatus.toLowerCase();
     
-    if (statusLower === 'proses' || statusLower === 'process' || statusLower === 'processing') {
+    if (statusLower === 'processing' || statusLower === 'processing' || statusLower === 'processing') {
         return 'success';
     }
     
@@ -297,38 +296,6 @@ app.get('/api/deposit/status/:id', async (req, res) => {
     } catch (error) {
         console.error('Status check error:', error);
         res.status(500).json({ success: false, message: 'Gagal mengecek status' });
-    }
-});
-
-// INSTANT CHECK
-app.post('/api/deposit/instant', async (req, res) => {
-    try {
-        const { id } = req.body;
-        if (!id) return res.status(400).json({ success: false, message: 'Deposit ID required' });
-        
-        const deposit = activeDeposits.get(id);
-        if (deposit && deposit.expiredAt < Date.now() && deposit.status === 'pending') {
-            deposit.status = 'expired';
-            activeDeposits.set(id, deposit);
-            return res.json({ success: true, data: { id, nominal: deposit.nominal, status: 'expired', instant: true } });
-        }
-        
-        const result = await callAtlanticAPI('/deposit/instant', { id: id, action: 'true' });
-        
-        if (!result.success || !result.data.status) {
-            return res.status(400).json({ success: false, message: result.data?.message || 'Instant check gagal' });
-        }
-
-        const status = result.data.data.status;
-        if (deposit && deposit.status !== status) {
-            deposit.status = status;
-            activeDeposits.set(id, deposit);
-        }
-
-        res.json({ success: true, data: { id: result.data.data.id, nominal: result.data.data.nominal, status: status, instant: true } });
-    } catch (error) {
-        console.error('Instant check error:', error);
-        res.status(500).json({ success: false, message: 'Gagal instant check' });
     }
 });
 
@@ -691,4 +658,5 @@ app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, '../frontend/index.html'));
 });
 
+// Untuk Vercel, export app
 export default app;
