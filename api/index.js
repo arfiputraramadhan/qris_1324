@@ -1,7 +1,7 @@
+// api/index.js
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import morgan from 'morgan';
 import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -16,7 +16,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
 // Konfigurasi
 const ATLANTIC_API_KEY = process.env.ATLANTIC_API_KEY;
@@ -25,16 +24,14 @@ const QRIS_EXPIRY_SECONDS = 59 * 60 + 28; // 59 menit 28 detik
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'arfi';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'arfiputra1324';
 
-// In-memory storage (menggantikan database)
-const depositsStore = new Map();
-const transfersStore = new Map();
+// In-memory storage (akan hilang saat function cold start)
+const activeDeposits = new Map();
 
 // Middleware
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: '*', credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-app.use(morgan('dev'));
 
 // Session middleware
 app.use(session({
@@ -42,7 +39,7 @@ app.use(session({
     resave: false,
     saveUninitialized: false,
     cookie: { 
-        secure: process.env.NODE_ENV === 'production',
+        secure: false,
         maxAge: 24 * 60 * 60 * 1000 // 24 jam
     }
 }));
@@ -50,16 +47,9 @@ app.use(session({
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200 });
 app.use('/api/', limiter);
 
-// Serve static files
-app.use(express.static(path.join(__dirname, '../frontend')));
-
 // Helper functions
 function generateReffId() {
     return `WEB${Date.now()}${Math.floor(Math.random() * 10000)}`;
-}
-
-function generateTransferRefId() {
-    return `TRF${Date.now()}${Math.floor(Math.random() * 10000)}`;
 }
 
 async function generateQRCodeBase64(qrString) {
@@ -75,35 +65,6 @@ async function generateQRCodeBase64(qrString) {
         console.error('QR Error:', error.message);
         return null;
     }
-}
-
-// Normalisasi status
-function normalizeStatus(apiStatus) {
-    if (!apiStatus) return 'pending';
-    
-    const statusLower = apiStatus.toLowerCase();
-    
-    if (statusLower === 'processing') {
-        return 'success';
-    }
-    
-    if (statusLower === 'success' || statusLower === 'paid' || statusLower === 'complete') {
-        return 'success';
-    }
-    if (statusLower === 'pending' || statusLower === 'waiting') {
-        return 'pending';
-    }
-    if (statusLower === 'expired') {
-        return 'expired';
-    }
-    if (statusLower === 'cancelled' || statusLower === 'cancel') {
-        return 'cancelled';
-    }
-    if (statusLower === 'failed') {
-        return 'failed';
-    }
-    
-    return 'pending';
 }
 
 async function callAtlanticAPI(endpoint, data) {
@@ -135,9 +96,6 @@ async function callAtlanticAPI(endpoint, data) {
         console.error(`❌ API Error (${endpoint}):`, error.message);
         
         if (error.response) {
-            console.error('Response status:', error.response.status);
-            console.error('Response data:', error.response.data);
-            
             if (error.response.status === 403) {
                 return { 
                     success: false, 
@@ -146,7 +104,6 @@ async function callAtlanticAPI(endpoint, data) {
                     data: error.response.data
                 };
             }
-            
             return { 
                 success: false, 
                 message: error.response.data?.message || `HTTP ${error.response.status}`,
@@ -157,6 +114,14 @@ async function callAtlanticAPI(endpoint, data) {
         
         return { success: false, message: error.message };
     }
+}
+
+function formatRupiah(amount) {
+    return new Intl.NumberFormat('id-ID', {
+        style: 'currency',
+        currency: 'IDR',
+        minimumFractionDigits: 0
+    }).format(amount);
 }
 
 // Admin authentication middleware
@@ -207,7 +172,7 @@ app.get('/api/admin/check', (req, res) => {
     });
 });
 
-// CREATE DEPOSIT (Public - dengan in-memory storage)
+// CREATE DEPOSIT (Public)
 app.post('/api/deposit/create', async (req, res) => {
     try {
         const { nominal, user_name } = req.body;
@@ -236,19 +201,16 @@ app.post('/api/deposit/create', async (req, res) => {
         const depositData = result.data.data;
         const qrBase64 = await generateQRCodeBase64(depositData.qr_string);
 
-        // Simpan ke memory storage
-        const depositRecord = {
+        activeDeposits.set(depositData.id, {
             id: depositData.id,
             reffId: reffId,
             nominal: nominal,
-            userName: user_name || 'user',
+            userName: user_name || 'Customer',
             status: 'pending',
             createdAt: Date.now(),
             expiredAt: expiredAt,
             qrString: depositData.qr_string
-        };
-        
-        depositsStore.set(depositData.id, depositRecord);
+        });
 
         res.json({
             success: true,
@@ -274,12 +236,9 @@ app.get('/api/deposit/status/:id', async (req, res) => {
     try {
         const { id } = req.params;
         
-        // Cek dari memory storage
-        let deposit = depositsStore.get(id);
-        
+        const deposit = activeDeposits.get(id);
         if (deposit && deposit.expiredAt < Date.now() && deposit.status === 'pending') {
             deposit.status = 'expired';
-            depositsStore.set(id, deposit);
             return res.json({ success: true, data: { id, nominal: deposit.nominal, status: 'expired' } });
         }
         
@@ -289,30 +248,45 @@ app.get('/api/deposit/status/:id', async (req, res) => {
             return res.status(404).json({ success: false, message: result.data?.message || 'Deposit tidak ditemukan' });
         }
 
-        const apiRawStatus = result.data.data.status;
-        const normalizedStatus = normalizeStatus(apiRawStatus);
-        
-        // Update status di memory storage jika berbeda
-        if (deposit && deposit.status !== normalizedStatus) {
-            deposit.status = normalizedStatus;
-            if (normalizedStatus === 'success') {
-                deposit.paymentTime = Date.now();
-            }
-            depositsStore.set(id, deposit);
+        const status = result.data.data.status;
+        if (activeDeposits.has(id)) {
+            activeDeposits.get(id).status = status;
         }
 
-        res.json({ 
-            success: true, 
-            data: { 
-                id: result.data.data.id, 
-                nominal: result.data.data.nominal, 
-                status: normalizedStatus,
-                raw_status: apiRawStatus
-            } 
-        });
+        res.json({ success: true, data: { id: result.data.data.id, nominal: result.data.data.nominal, status: status } });
     } catch (error) {
         console.error('Status check error:', error);
         res.status(500).json({ success: false, message: 'Gagal mengecek status' });
+    }
+});
+
+// INSTANT CHECK (Public)
+app.post('/api/deposit/instant', async (req, res) => {
+    try {
+        const { id } = req.body;
+        if (!id) return res.status(400).json({ success: false, message: 'Deposit ID required' });
+        
+        const deposit = activeDeposits.get(id);
+        if (deposit && deposit.expiredAt < Date.now() && deposit.status === 'pending') {
+            deposit.status = 'expired';
+            return res.json({ success: true, data: { id, nominal: deposit.nominal, status: 'expired', instant: true } });
+        }
+        
+        const result = await callAtlanticAPI('/deposit/instant', { id: id, action: 'true' });
+        
+        if (!result.success || !result.data.status) {
+            return res.status(400).json({ success: false, message: result.data?.message || 'Instant check gagal' });
+        }
+
+        const status = result.data.data.status;
+        if (activeDeposits.has(id)) {
+            activeDeposits.get(id).status = status;
+        }
+
+        res.json({ success: true, data: { id: result.data.data.id, nominal: result.data.data.nominal, status: status, instant: true } });
+    } catch (error) {
+        console.error('Instant check error:', error);
+        res.status(500).json({ success: false, message: 'Gagal instant check' });
     }
 });
 
@@ -327,11 +301,8 @@ app.post('/api/deposit/cancel', async (req, res) => {
             return res.status(400).json({ success: false, message: result.data?.message || 'Gagal membatalkan' });
         }
 
-        // Update memory storage
-        const deposit = depositsStore.get(id);
-        if (deposit) {
-            deposit.status = 'cancelled';
-            depositsStore.set(id, deposit);
+        if (activeDeposits.has(id)) {
+            activeDeposits.get(id).status = 'cancelled';
         }
         
         res.json({ success: true, message: 'Deposit berhasil dibatalkan' });
@@ -343,12 +314,11 @@ app.post('/api/deposit/cancel', async (req, res) => {
 
 // GET ALL ACTIVE DEPOSITS (Public)
 app.get('/api/deposits/active', (req, res) => {
-    const deposits = Array.from(depositsStore.values())
-        .filter(d => d.status === 'pending' && d.expiredAt > Date.now());
+    const deposits = Array.from(activeDeposits.values()).filter(d => d.status === 'pending');
     res.json({ success: true, data: deposits, count: deposits.length });
 });
 
-// GET PROFILE (Public)
+// GET PROFILE (Public - limited info)
 app.get('/api/profile', async (req, res) => {
     try {
         const result = await callAtlanticAPI('/get_profile', {});
@@ -371,7 +341,7 @@ app.get('/api/profile', async (req, res) => {
 
 // ==================== ADMIN ONLY API ROUTES ====================
 
-// GET PROFILE (Admin only)
+// GET PROFILE (Admin only - complete profile)
 app.get('/api/admin/profile', requireAdmin, async (req, res) => {
     try {
         const result = await callAtlanticAPI('/get_profile', {});
@@ -394,73 +364,6 @@ app.get('/api/admin/profile', requireAdmin, async (req, res) => {
     } catch (error) {
         console.error('Profile error:', error);
         res.status(500).json({ success: false, message: 'Gagal mengambil profile' });
-    }
-});
-
-// GET ALL DEPOSITS (Admin only - from memory)
-app.get('/api/admin/deposits/all', requireAdmin, (req, res) => {
-    const { status, search, limit } = req.query;
-    let deposits = Array.from(depositsStore.values());
-    
-    if (status && status !== 'all') {
-        deposits = deposits.filter(d => d.status === status);
-    }
-    if (search) {
-        const searchLower = search.toLowerCase();
-        deposits = deposits.filter(d => 
-            d.id.toLowerCase().includes(searchLower) || 
-            d.reffId.toLowerCase().includes(searchLower) ||
-            d.userName.toLowerCase().includes(searchLower)
-        );
-    }
-    if (limit) {
-        deposits = deposits.slice(0, parseInt(limit));
-    }
-    
-    // Sort by createdAt descending
-    deposits.sort((a, b) => b.createdAt - a.createdAt);
-    
-    res.json({ success: true, data: deposits, count: deposits.length });
-});
-
-// GET DEPOSIT STATISTICS (Admin only)
-app.get('/api/admin/deposits/stats', requireAdmin, (req, res) => {
-    const deposits = Array.from(depositsStore.values());
-    const stats = {
-        total: deposits.length,
-        pending: deposits.filter(d => d.status === 'pending').length,
-        success: deposits.filter(d => d.status === 'success').length,
-        expired: deposits.filter(d => d.status === 'expired').length,
-        cancelled: deposits.filter(d => d.status === 'cancelled').length,
-        totalAmount: deposits
-            .filter(d => d.status === 'success')
-            .reduce((sum, d) => sum + d.nominal, 0)
-    };
-    res.json({ success: true, data: stats });
-});
-
-// UPDATE EXPIRED DEPOSITS (Admin only)
-app.post('/api/admin/deposits/update-expired', requireAdmin, (req, res) => {
-    let changes = 0;
-    for (const [id, deposit] of depositsStore.entries()) {
-        if (deposit.status === 'pending' && deposit.expiredAt < Date.now()) {
-            deposit.status = 'expired';
-            depositsStore.set(id, deposit);
-            changes++;
-        }
-    }
-    res.json({ success: true, message: 'Expired deposits updated', changes: changes });
-});
-
-// DELETE DEPOSIT (Admin only)
-app.delete('/api/admin/deposit/:id', requireAdmin, (req, res) => {
-    const { id } = req.params;
-    const deleted = depositsStore.delete(id);
-    
-    if (deleted) {
-        res.json({ success: true, message: 'Deposit dihapus' });
-    } else {
-        res.status(404).json({ success: false, message: 'Deposit tidak ditemukan' });
     }
 });
 
@@ -586,36 +489,19 @@ app.post('/api/admin/transfer', requireAdmin, async (req, res) => {
         
         const transferResult = result.data.data || result.data;
         
-        // Simpan transfer ke memory storage
-        const transferRecord = {
-            id: transferResult.id || transferResult.transaction_id || generateTransferRefId(),
-            reff_id: ref_id,
-            kode_bank: kode_bank,
-            nomor_akun: nomor_akun,
-            nama_pemilik: nama_pemilik,
-            nominal: nominalInt,
-            fee: fee,
-            total: total,
-            status: transferResult.status || 'pending',
-            note: note || '',
-            created_at: Date.now()
-        };
-        
-        transfersStore.set(transferRecord.id, transferRecord);
-        
         res.json({
             success: true,
             message: 'Transfer berhasil diproses',
             data: {
-                id: transferRecord.id,
-                reff_id: ref_id,
-                status: transferRecord.status,
-                name: nama_pemilik,
-                nomor_tujuan: nomor_akun,
+                id: transferResult.id || transferResult.transaction_id || generateReffId(),
+                reff_id: transferResult.reff_id || ref_id,
+                status: transferResult.status || 'pending',
+                name: transferResult.name || nama_pemilik,
+                nomor_tujuan: transferResult.nomor_tujuan || nomor_akun,
                 nominal: nominalInt,
                 fee: fee,
                 total: total,
-                created_at: new Date().toISOString()
+                created_at: transferResult.created_at || new Date().toISOString()
             }
         });
         
@@ -626,23 +512,6 @@ app.post('/api/admin/transfer', requireAdmin, async (req, res) => {
             message: 'Terjadi kesalahan saat transfer: ' + error.message 
         });
     }
-});
-
-// GET ALL TRANSFERS (Admin only)
-app.get('/api/admin/transfers/all', requireAdmin, (req, res) => {
-    const { status, limit } = req.query;
-    let transfers = Array.from(transfersStore.values());
-    
-    if (status && status !== 'all') {
-        transfers = transfers.filter(t => t.status === status);
-    }
-    if (limit) {
-        transfers = transfers.slice(0, parseInt(limit));
-    }
-    
-    transfers.sort((a, b) => b.created_at - a.created_at);
-    
-    res.json({ success: true, data: transfers, count: transfers.length });
 });
 
 // CHECK TRANSFER STATUS (Admin only)
@@ -666,17 +535,6 @@ app.post('/api/admin/transfer/status', requireAdmin, async (req, res) => {
         
         if (!result || !result.success || !result.data.status) {
             return res.status(404).json({ success: false, message: result?.data?.message || 'Transaksi tidak ditemukan' });
-        }
-        
-        // Update status di memory storage
-        const apiStatus = result.data.data?.status;
-        if (apiStatus) {
-            const transfer = transfersStore.get(id);
-            if (transfer) {
-                transfer.status = apiStatus;
-                transfer.updated_at = Date.now();
-                transfersStore.set(id, transfer);
-            }
         }
         
         res.json({
@@ -744,33 +602,30 @@ app.post('/api/admin/check-account', requireAdmin, async (req, res) => {
     }
 });
 
-// Format Rupiah helper
-function formatRupiah(amount) {
-    return new Intl.NumberFormat('id-ID', {
-        style: 'currency',
-        currency: 'IDR',
-        minimumFractionDigits: 0
-    }).format(amount);
-}
+// GET ALL DEPOSITS (Admin only)
+app.get('/api/admin/deposits/all', requireAdmin, (req, res) => {
+    const deposits = Array.from(activeDeposits.values());
+    res.json({ success: true, data: deposits, count: deposits.length });
+});
 
-// Fallback route
+// DELETE DEPOSIT (Admin only)
+app.delete('/api/admin/deposit/:id', requireAdmin, (req, res) => {
+    const { id } = req.params;
+    if (activeDeposits.has(id)) {
+        activeDeposits.delete(id);
+        res.json({ success: true, message: 'Deposit dihapus' });
+    } else {
+        res.status(404).json({ success: false, message: 'Deposit tidak ditemukan' });
+    }
+});
+
+// Serve static files for frontend (untuk production di Vercel)
+app.use(express.static(path.join(__dirname, '../frontend')));
+
+// Fallback route untuk SPA
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, '../frontend/index.html'));
 });
 
-// For Vercel serverless
+// Export untuk Vercel
 export default app;
-
-// For local development
-if (process.env.NODE_ENV !== 'production') {
-    app.listen(PORT, () => {
-        console.log(`
-        
-                    WEB ATLANTIC
-          Running on http://localhost:${PORT}       
-                🔐 ADMIN LOGIN:                     
-              Username: ${ADMIN_USERNAME}   
-              Password: ${ADMIN_PASSWORD}
-        `);
-    });
-}
