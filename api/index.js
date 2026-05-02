@@ -18,7 +18,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 
 // Konfigurasi
-const ATLANTIC_API_KEY = process.env.ATLANTIC_API_KEY;
+const ATLANTIC_API_KEY = process.env.ATLANTIC_API_KEY || 'm7xrIkmCXNAWNJRMXSTabwDIyFSaWWDPiX7rXdcz4idQ01wNcE9qLw6QfXfmVgekh5TUU3K4PM5Q0tkOL2MtE8pH2SBfJ71Ti1a7';
 const ATLANTIC_API_URL = process.env.ATLANTIC_API_URL || 'https://atlantich2h.com';
 const QRIS_EXPIRY_SECONDS = 59 * 60 + 28; // 59 menit 28 detik
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'arfi';
